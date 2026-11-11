@@ -1,0 +1,21 @@
+{
+  "name": "Mini RTS",
+  "genre": "strategy",
+  "dim": "2D",
+  "mode": "Versus",
+  "players": "2–4",
+  "hook": "Gather, build, train an army. Last base standing wins.",
+  "how": "Workers dig gold and chop wood; spend it on a barracks, towers and three kinds of soldiers. Spearmen beat riders, riders beat archers, archers beat spearmen: build the right army and destroy the other Town Halls.",
+  "controls": "Click or drag a box to select, right-click to move, attack or gather, WASD to look around; touch: tap to select, tap the map to send, drag to look around",
+  "uses": [
+    ["Leaderboard", "The most enemy units and buildings each player's base destroyed in a match."],
+    ["Bots", "Bots run every base nobody plays: they build up, counter your army and attack in waves."],
+    ["Host-run rules", "The host's browser runs every unit and checks every order; if it leaves, the next player takes over."],
+    ["Live sync", "Everyone sees the same units moving and fighting."]
+  ],
+  "ideas": [
+    "Make it a space war with ships and asteroid mining",
+    "Add a fourth unit, a catapult that's great against buildings",
+    "Hide the map until your units have seen it"
+  ]
+}

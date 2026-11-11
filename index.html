@@ -1,0 +1,966 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Mini RTS</title>
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; overscroll-behavior: none; background: #1d2a1a; }
+  body { font: 14px/1.3 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; color: #f2f5ea; user-select: none; -webkit-user-select: none; }
+  canvas { display: block; width: 100vw; height: 100vh; height: 100dvh; touch-action: none; }
+  .hud { position: fixed; pointer-events: none; text-shadow: 0 1px 3px #000c; }
+  #top { top: max(8px, env(safe-area-inset-top)); left: max(10px, env(safe-area-inset-left)); display: flex; gap: 12px; align-items: center; font-weight: 800; font-size: 15px;
+         background: #0d140bcc; padding: 6px 12px; border-radius: 12px; }
+  #top small { font-weight: 600; opacity: .8; font-size: 12px; }
+  #net { top: calc(max(8px, env(safe-area-inset-top)) + 40px); left: max(12px, env(safe-area-inset-left)); font-size: 12px; opacity: .8; }
+  #msg { top: 26%; left: 0; right: 0; text-align: center; font-size: 32px; font-weight: 900; opacity: 0; transition: opacity .3s; }
+  #msg small { display: block; font-size: 15px; font-weight: 700; }
+  #panel { position: fixed; left: 50%; transform: translateX(-50%); bottom: max(10px, env(safe-area-inset-bottom)); width: min(600px, calc(100vw - 20px)); box-sizing: border-box;
+           padding: 8px 10px; border-radius: 14px; background: #0f170dea; border: 1px solid #ffffff22; }
+  #what { font-weight: 800; font-size: 13px; margin-bottom: 6px; display: flex; justify-content: space-between; gap: 8px; }
+  #what small { font-weight: 600; opacity: .8; }
+  #acts { display: flex; flex-wrap: wrap; gap: 6px; }
+  #acts button { flex: 1 1 0; min-width: 76px; min-height: 46px; border: 0; border-radius: 10px; background: #2c4226; color: #fff; font: 800 13px system-ui, sans-serif; cursor: pointer; padding: 3px 6px; }
+  #acts button small { display: block; font-weight: 600; font-size: 11px; opacity: .85; }
+  #acts button.on { background: #ffd166; color: #2a1a00; }
+  #acts button:disabled { opacity: .4; cursor: default; }
+  #over { position: fixed; inset: 0; display: grid; place-items: center; background: #0b120ac0; }
+  #over[hidden] { display: none; }
+  .card { box-sizing: border-box; width: min(380px, calc(100vw - 32px)); max-height: 90vh; overflow: auto; padding: 20px; border-radius: 16px; background: #1b2a17; border: 1px solid #ffffff26; text-align: center; }
+  .card h2 { margin: 0; font-size: 25px; color: #ffd166; } .card h3 { margin: 14px 0 4px; font-size: 13px; color: #b5e08a; text-align: left; }
+  .card p { margin: 6px 0; font-size: 14px; opacity: .85; }
+  .card ol { margin: 0; padding-left: 24px; font-size: 14px; text-align: left; } .card li span { float: right; }
+  button.go { width: 100%; min-height: 48px; margin-top: 14px; border: 0; border-radius: 12px; background: #ffd166; color: #2a1a00; font: 800 17px system-ui, sans-serif; cursor: pointer; }
+  @media (max-width: 520px) { #top { font-size: 13px; gap: 8px; padding: 5px 9px; } #acts button { min-width: 64px; font-size: 12px; } }
+</style>
+<script src="https://cdn.multiplayeragent.com/sdk/mp.global.js"></script>
+</head>
+<body>
+<canvas id="game"></canvas>
+<div class="hud" id="top"></div>
+<div class="hud" id="net">Connecting…</div>
+<div class="hud" id="msg"></div>
+<div id="panel"><div id="what"></div><div id="acts"></div></div>
+<div id="over" hidden><div class="card">
+  <h2 id="overTitle"></h2><p id="overSub"></p>
+  <h3>Most kills in a match</h3><ol id="board"><li>Loading…</li></ol>
+  <button class="go" id="again">New match</button><p id="overNext"></p>
+</div></div>
+<script>
+/* ═══ MINI RTS · a Multiplayer Agent starter ═════════════════════════════════════════
+ * Gather, build, train, crush the other bases. Versus, 2–4 players; bots run every base
+ * nobody plays.
+ *
+ * WHERE THINGS ARE (search for the "── " headers):
+ *   CONFIG ........ map size, costs, the unit and building types (and who beats whom)
+ *   CONNECTION .... MP_CONNECT, joining, the offline room, who is host
+ *   MAP ........... where the bases, gold mines and trees are (the same every match)
+ *   SIM (HOST) .... the whole battle: gathering, building, training, moving, fighting.
+ *                   Only the host runs it and writes the shared fields.
+ *   COMMANDS ...... what a player can order (move, attack, gather, build, train), checked by the host
+ *   BOTS (HOST) ... build order, workers, counters and attack waves
+ *   VIEW .......... reading the battle back from state, for everyone who isn't host
+ *   DRAW .......... camera, ground, resources, buildings, units, arrows, minimap
+ *   HUD & PANEL ... resources, the selection panel's buttons, results, leaderboard
+ *   INPUT ......... select (click, drag a box, tap), command (right-click, tap), camera
+ *
+ * HOW THE MULTIPLAYER WORKS (a relay room: no server code, the HOST's browser runs the battle):
+ *   - `match` (ONE shared JSON field, host-only): {id, v, ph: play|over, at, end, win,
+ *     seats [4 bases] each {w: who ("" = bot), n, c, out}}. `v` goes up on every write.
+ *   - `u0`…`u3` (host, ~7/s): each base's units, packed [id, type, x, y, hp, action, target,
+ *     attack count, order, carrying]. `b0`…`b3` (host, on change): gold, wood, kills and the
+ *     buildings [id, type, x, y, hp, built %, training queue, queue start, shots, target].
+ *     `res` (host): what's left in every mine and tree. A new host adopts all of it.
+ *   - Each player writes only `n`/`c` (name, color) and `hb` (heartbeat).
+ *   - Players send intents to the host: "cmd" {k: go|stop|train|build, u: unit ids, x, y,
+ *     tg (target id), r (resource), b (building), t (type)}. The host checks you own the units,
+ *     can pay and the spot is free, then sets each unit's order.
+ *   - Everyone else draws the units eased between snapshots.
+ *   - ?attract plays offline with four bot bases (the preview video is recorded from it).
+ *   - Leaderboard "most-kills": the most enemy units and buildings each player's base destroyed.
+ */
+
+// ── CONFIG ──────────────────────────────────────────────────────────────────────────
+const CONFIG = {
+  map: 1500,            // the map is map × map world px
+  seats: 4,             // bases on the map (bots run the ones nobody plays)
+  startGold: 150, startWood: 100, startWorkers: 4,
+  unitCap: 30,          // most units a base can have (counting the queue)
+  carry: 8,             // what a worker carries per trip
+  gatherMs: 1400,       // time to dig or chop one load
+  aggro: 170,           // how far idle soldiers look for a fight
+  buildRange: 420,      // new buildings go within this distance of your own buildings
+  sendMs: 140,          // the host sends units ~7 times a second
+  matchMs: 600000,      // after 10 minutes the strongest base wins
+  resultsMs: 15000,     // the results show this long, then a new match starts
+  firstWave: 6,         // bots attack when their army is this big (and +2 each wave)...
+  calmMs: 150000,       // ...but not in the first 2.5 minutes, so new players can build up
+  seatGraceMs: 10000,   // a player silent this long hands its base to a bot
+  board: "most-kills",
+};
+// beats = the type it deals double damage to (and takes less from): Spearman > Rider > Archer > Spearman.
+const UNITS = [
+  { n: "Worker", hp: 40, dmg: 4, range: 4, cd: 1.0, speed: 74, r: 9, gold: 50, wood: 0, time: 4, beats: -1, key: "Q" },
+  { n: "Spearman", hp: 90, dmg: 10, range: 6, cd: 1.0, speed: 66, r: 10, gold: 60, wood: 20, time: 6, beats: 3, key: "Q" },
+  { n: "Archer", hp: 60, dmg: 9, range: 140, cd: 1.2, speed: 70, r: 10, gold: 50, wood: 40, time: 7, beats: 1, key: "W" },
+  { n: "Rider", hp: 110, dmg: 13, range: 6, cd: 1.1, speed: 108, r: 12, gold: 80, wood: 40, time: 8, beats: 2, key: "E" },
+];
+const BUILDS = [
+  { n: "Town Hall", hp: 1500, r: 42, gold: 0, wood: 0, time: 0, trains: [0], range: 170, dmg: 5, cd: 1.2 },
+  { n: "Barracks", hp: 600, r: 32, gold: 100, wood: 120, time: 14, trains: [1, 2, 3], key: "Q" },
+  { n: "Tower", hp: 450, r: 20, gold: 75, wood: 100, time: 10, trains: [], range: 220, dmg: 14, cd: 1.0, key: "W" },
+];
+const COLORS = ["#4da6ff", "#ff5a5a", "#ffd23f", "#c77dff", "#52d273", "#ff8c42", "#ff6fb5", "#3de0d0"];
+const BOT_NAMES = ["Iron Duke", "Red Baron", "Sun Queen", "Violet King"];
+
+// ── CONNECTION ──────────────────────────────────────────────────────────────────────
+// The builder fills these in for this game. Downloaded from GitHub? Put your own pk_ key here.
+const MP_CONNECT = {
+  key: 'pk_REPLACE_ME',
+  room: 'mini-rts',
+  endpoint: 'wss://live.multiplayeragent.com',
+  apiUrl: 'https://api.multiplayeragent.com',
+};
+const ATTRACT = new URLSearchParams(location.search).has("attract");
+if (ATTRACT) Object.assign(CONFIG, { startGold: 900, startWood: 900, firstWave: 4, calmMs: 0, resultsMs: 1500 });
+
+/** Same shape as the SDK client, kept in this tab: offline play and ?attract. */
+function localRoom() {
+  const id = "local", state = { entities: { players: { [id]: {} } }, shared: {} }, subs = [];
+  let queued = false;
+  const emit = () => { if (!queued) { queued = true; queueMicrotask(() => { queued = false; subs.forEach((f) => f(state)); }); } };
+  const put = (o, k, v) => { if (typeof k === "object") Object.assign(o, k); else o[k] = v; emit(); };
+  return {
+    sessionId: id, state, offline: true,
+    me: { set: (k, v) => put(state.entities.players[id], k, v) },
+    setShared: (k, v) => put(state.shared, k, v),
+    onState: (f) => { subs.push(f); f(state); }, onJoin() {}, onLeave() {}, on() {}, send() {},
+    onDisconnect() {}, onReconnect() {}, leave: async () => {},
+  };
+}
+async function connect() {
+  if (ATTRACT || typeof MP === "undefined") return localRoom();
+  try {
+    const mp = await Promise.race([MP.join({ ...MP_CONNECT }), new Promise((_, no) => setTimeout(() => no(new Error("timed out")), 10000))]);
+    window.mp = mp; // the builder calls window.mp.leave() when the page closes
+    return mp;
+  } catch (e) {
+    console.warn("Playing offline:", e && e.message);
+    return localRoom();
+  }
+}
+const parse = (v, fb) => { if (typeof v !== "string") return fb; try { return JSON.parse(v); } catch { return fb; } };
+let net = null, S = { entities: { players: {} }, shared: {} }, joinedAt = 0;
+const memo = new Map();
+/** A shared JSON field, parsed once per change (read-only: never mutate what this returns). `as` names a mapped view of it. */
+function shared(key, fallback, map = (v) => v, as = "") {
+  const raw = S.shared[key], m = memo.get(key + as);
+  if (m && m.raw === raw) return m.v;
+  const v = map(parse(raw, fallback)); memo.set(key + as, { raw, v }); return v;
+}
+const seenHb = new Map();
+/** Players whose heartbeat moved in the last 3s (plus us), sorted by sessionId. */
+function livePlayers() {
+  const now = performance.now(), out = [];
+  for (const [id, p] of Object.entries(S.entities.players || {})) {
+    const s = seenHb.get(id);
+    if (!s || s.hb !== p.hb) seenHb.set(id, { hb: p.hb, at: now });
+    if (id === net.sessionId || now - seenHb.get(id).at < 3000) out.push(id);
+  }
+  return out.sort();
+}
+let frameAt = 0, wokeAt = -1e9; // my loop's last frame, and when it last woke from a stall (a frozen or background tab)
+/** Never while my own loop is stalled, nor for 0.7s after it wakes: the room moved on without me, so the newer state lands first. */
+const isHost = () => livePlayers()[0] === net.sessionId && performance.now() - frameAt < 1000 && performance.now() - wokeAt > 700;
+const stillHere = (id) => id === net.sessionId || (!!S.entities.players[id] && performance.now() - (seenHb.get(id)?.at ?? -1e9) < CONFIG.seatGraceMs);
+
+// ── MAP ─────────────────────────────────────────────────────────────────────────────
+const MS = CONFIG.map, MID = { x: MS / 2, y: MS / 2 };
+const BASES = [[240, 240], [MS - 240, MS - 240], [MS - 240, 240], [240, MS - 240]]; // seats 0 and 1 face each other across the map
+/** Every gold mine and tree: one mine and a grove by each base, a rich mine and four groves in the middle. */
+const RES = (() => {
+  const out = [];
+  BASES.forEach(([x, y]) => {
+    const sx = x < MS / 2 ? 1 : -1, sy = y < MS / 2 ? 1 : -1;
+    out.push({ k: "g", x: x + sx * 195, y: y - sy * 85, r: 26, amt: 1600 });
+    for (let i = 0; i < 6; i++) out.push({ k: "w", x: x - sx * 80 + sx * i * 30, y: y + sy * 195 + (i % 2) * 24 * sy, r: 14, amt: 200 });
+  });
+  out.push({ k: "g", x: MID.x, y: MID.y, r: 34, amt: 3000 });
+  for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) for (let i = 0; i < 3; i++) out.push({ k: "w", x: MID.x + dx * 230 + dy * (i - 1) * 30, y: MID.y + dy * 230 + dx * (i - 1) * 30, r: 14, amt: 200 });
+  return out;
+})();
+const dist = (a, b) => Math.hypot(a.x - b.x, a.y - b.y);
+const rnd = (a, b) => a + Math.random() * (b - a);
+
+// ── SIM (HOST) ──────────────────────────────────────────────────────────────────────
+// host.f[k] = { g, w, kills, b: [buildings], u: [units] } for each base; host.amt = what's left in each resource.
+const host = { wasHost: false, last: null, f: [], amt: [], nextId: 1, lastU: 0, dirtyB: [true, true, true, true], dirtyRes: true, lastRes: 0, cmds: [], botAt: 0, waves: [0, 0, 0, 0], again: false };
+function match() {
+  const m = shared("match", null);
+  return host.last && isHost() && (!m || host.last.v > m.v) ? host.last : m;
+}
+function writeMatch(m) { m = { ...m, v: Math.max(host.last?.v ?? 0, shared("match", null)?.v ?? 0) + 1 }; host.last = m; net.setShared("match", JSON.stringify(m)); return m; }
+const newUnit = (t, x, y, o) => ({ id: host.nextId++, t, x, y, hp: UNITS[t].hp, ord: "", cr: 0, cd: 0, sw: 0, tg: 0, a: 0, ht: 0, o });
+const newBuilding = (t, x, y, o, built) => ({ id: host.nextId++, t, x, y, hp: built ? BUILDS[t].hp : Math.round(BUILDS[t].hp * 0.1), bp: built ? 100 : 0, q: "", qs: 0, cd: 0, sw: 0, tg: 0, o });
+/** A fresh map: every base gets its hall and workers (the preview's bases start with a barracks, a tower and soldiers on the way). */
+function newBattle() {
+  host.f = BASES.map(([x, y], k) => {
+    const sx = x < MS / 2 ? 1 : -1, sy = y < MS / 2 ? 1 : -1, f = { g: CONFIG.startGold, w: CONFIG.startWood, kills: 0, b: [newBuilding(0, x, y, k, true)], u: [] };
+    for (let i = 0; i < CONFIG.startWorkers; i++) { const u = newUnit(0, x + sx * (60 + i * 18), y - sy * 30 + i * 6, k); u.ord = "g" + RES.findIndex((r) => r.k === (i === CONFIG.startWorkers - 1 ? "w" : "g") && Math.hypot(r.x - x, r.y - y) < 300); f.u.push(u); } // three dig gold, one chops wood
+    if (ATTRACT) {
+      f.b.push(newBuilding(1, x + sx * 110, y + sy * 90, k, true), newBuilding(2, x + sx * 170, y + sy * 170, k, true));
+      // the preview: two armies march on base 0 (top left), which defends; the camera watches that base
+      const [ax, ay, to] = [[330, 470, null], [MID.x, MID.y, MID], [880, 300, { x: 260, y: 300 }], [270, 860, { x: 300, y: 330 }]][k];
+      for (let i = 0; i < 7; i++) { const u = newUnit(1 + (i % 3), ax + rnd(-45, 45), ay + rnd(-45, 45), k); if (to) u.ord = `A${Math.round(to.x + rnd(-40, 40))},${Math.round(to.y + rnd(-40, 40))}`; f.u.push(u); }
+    }
+    return f;
+  });
+  host.amt = RES.map((r) => r.amt);
+  host.dirtyB = [true, true, true, true]; host.dirtyRes = true; host.waves = [0, 0, 0, 0];
+}
+/** Become host: take over the battle exactly as state has it. */
+function adopt() {
+  host.last = null;
+  if (!shared("b0", null)) { host.f = []; return; } // no battle in state yet: hostTick starts one
+  host.f = [0, 1, 2, 3].map((k) => {
+    const b = shared("b" + k, null), u = shared("u" + k, []);
+    return { g: b?.g ?? 0, w: b?.w ?? 0, kills: b?.kl ?? 0,
+      b: (b?.b || []).map(([id, t, x, y, hp, bp, q, qs, sw, tg]) => ({ id, t, x, y, hp, bp, q: String(q || ""), qs, cd: 0, sw, tg, o: k })),
+      u: u.map(([id, t, x, y, hp, a, tg, sw, ord, cr]) => ({ id, t, x, y, hp, a, tg, sw, ord: String(ord || ""), cr, cd: 0, ht: 0, o: k })) };
+  });
+  const amt = shared("res", null);
+  host.amt = Array.isArray(amt) && amt.length === RES.length ? amt.slice() : RES.map((r) => r.amt);
+  host.nextId = 1 + Math.max(0, ...host.f.flatMap((f) => [...f.b.map((b) => b.id), ...f.u.map((u) => u.id)]));
+  host.dirtyB = [true, true, true, true];
+}
+const isDone = (b) => b.bp >= 100;
+/** The damage one attack does: double against the type it beats, less against the type that beats it. */
+function damage(a, t, isBuilding) {
+  if (a.isB) return BUILDS[a.t].dmg;
+  const A = UNITS[a.t];
+  if (isBuilding) return A.dmg * (a.t === 0 ? 0.6 : a.t === 2 ? 0.7 : 1);
+  return A.dmg * (A.beats === t.t ? 2 : 1) * (UNITS[t.t].beats === a.t ? 0.6 : 1);
+}
+function simTick(dt, now) {
+  const m = match();
+  const all = [], blds = [], byId = new Map();
+  host.f.forEach((f, k) => { for (const u of f.u) { u.o = k; all.push(u); byId.set(u.id, u); } for (const b of f.b) { b.o = k; b.isB = true; blds.push(b); byId.set(b.id, b); } });
+  const enemyNear = (o, x, y, range, unitsFirst) => {
+    let best = null, bd = range;
+    for (const u of all) if (u.o !== o && u.hp > 0) { const d = Math.hypot(u.x - x, u.y - y) - UNITS[u.t].r; if (d < bd) { bd = d; best = u; } }
+    if (best && unitsFirst) return best;
+    for (const b of blds) if (b.o !== o && b.hp > 0) { const d = Math.hypot(b.x - x, b.y - y) - BUILDS[b.t].r; if (d < bd) { bd = d; best = b; } }
+    return best;
+  };
+  const hit = (a, t) => {
+    t.hp -= damage(a, t, !!t.isB);
+    if (t.hp <= 0 && !t.dead) { t.dead = true; if (t.o !== a.o) host.f[a.o].kills++; host.dirtyB[a.o] = true; }
+  };
+  // training: the first unit in each queue pops out when its time is up
+  for (const b of blds) if (isDone(b) && b.q.length) {
+    const t = +b.q[0];
+    if (now - b.qs >= UNITS[t].time * 1000) {
+      const a = Math.atan2(MID.y - b.y, MID.x - b.x) + rnd(-0.6, 0.6), u = newUnit(t, b.x + Math.cos(a) * (BUILDS[b.t].r + 14), b.y + Math.sin(a) * (BUILDS[b.t].r + 14), b.o);
+      if (t === 0) u.ord = autoGather(u); else if (m.seats[b.o].w === "") u.ord = "";
+      host.f[b.o].u.push(u); all.push(u); byId.set(u.id, u);
+      b.q = b.q.slice(1); b.qs = now; host.dirtyB[b.o] = true;
+    }
+  }
+  // towers and halls shoot the nearest enemy unit in range
+  for (const b of blds) {
+    const B = BUILDS[b.t];
+    if (!B.dmg || !isDone(b)) continue;
+    b.cd -= dt;
+    if (b.cd > 0) continue;
+    const e = enemyNear(b.o, b.x, b.y, B.range, true);
+    if (e && !e.isB) { b.cd = B.cd; b.sw++; b.tg = e.id; hit(b, e); host.dirtyB[b.o] = true; } else b.tg = 0;
+  }
+  // every unit follows its order
+  for (const u of all) if (u.hp > 0) unitTick(u, dt, byId, enemyNear, hit);
+  // bodies push apart, and out of buildings, mines and trees
+  for (let i = 0; i < all.length; i++) {
+    const a = all[i], ra = UNITS[a.t].r;
+    for (let j = i + 1; j < all.length; j++) {
+      const b = all[j], dx = b.x - a.x, dy = b.y - a.y, min = ra + UNITS[b.t].r;
+      if (Math.abs(dx) > min || Math.abs(dy) > min) continue;
+      const d = Math.hypot(dx, dy) || 0.01;
+      if (d < min) { const push = (min - d) / 2, nx = dx / d, ny = dy / d; a.x -= nx * push; a.y -= ny * push; b.x += nx * push; b.y += ny * push; }
+    }
+    for (const o of blds) pushOut(a, o.x, o.y, BUILDS[o.t].r + ra);
+    for (let n = 0; n < RES.length; n++) if (host.amt[n] > 0) pushOut(a, RES[n].x, RES[n].y, RES[n].r + ra - 4);
+    a.x = Math.max(ra, Math.min(MS - ra, a.x)); a.y = Math.max(ra, Math.min(MS - ra, a.y));
+  }
+  // the dead are removed; a base that lost its last Town Hall is out
+  let out = null;
+  host.f.forEach((f, k) => {
+    const before = f.b.length; f.u = f.u.filter((u) => u.hp > 0); f.b = f.b.filter((b) => b.hp > 0);
+    if (f.b.length !== before) host.dirtyB[k] = true;
+    if (!m.seats[k].out && !f.b.some((b) => b.t === 0)) { f.u = []; f.b = []; host.dirtyB[k] = true; (out ||= []).push(k); }
+  });
+  if (out) writeMatch({ ...match(), seats: match().seats.map((s, k) => (out.includes(k) ? { ...s, out: 1 } : s)) });
+}
+function pushOut(u, x, y, min) {
+  const dx = u.x - x, dy = u.y - y, d = Math.hypot(dx, dy);
+  if (d < min) { const nx = d ? dx / d : 1, ny = d ? dy / d : 0; u.x = x + nx * min; u.y = y + ny * min; }
+}
+/** Walk toward a point; a little sideways when something blocks the way. */
+function moveToward(u, x, y, step) {
+  const dx = x - u.x, dy = y - u.y, d = Math.hypot(dx, dy);
+  if (d < 0.5) return;
+  const s = Math.min(d, step); u.x += (dx / d) * s; u.y += (dy / d) * s;
+}
+/** The nearest node of a kind with something left in it, for a worker. */
+function nearestNode(k, u, max = 1e9) {
+  let best = -1, bd = max;
+  RES.forEach((r, n) => { if (r.k === k && host.amt[n] > 0) { const d = Math.hypot(r.x - u.x, r.y - u.y); if (d < bd) { bd = d; best = n; } } });
+  return best;
+}
+const autoGather = (u) => { const n = nearestNode("g", u, 500); return n >= 0 ? "g" + n : ""; };
+/** One unit, one step: gather (dig, carry home, repeat), build, attack, move, attack-move, or stand guard. */
+function unitTick(u, dt, byId, enemyNear, hit) {
+  const U = UNITS[u.t], f = host.f[u.o], ord = u.ord, step = U.speed * dt;
+  u.cd -= dt; u.a = 0;
+  const engage = (t) => {
+    const tr = t.isB ? BUILDS[t.t].r : UNITS[t.t].r, d = Math.hypot(t.x - u.x, t.y - u.y);
+    u.tg = t.id;
+    if (d > U.range + U.r + tr) { moveToward(u, t.x, t.y, step); return; }
+    u.a = 1;
+    if (u.cd <= 0) { u.cd = U.cd; u.sw++; hit(u, t); }
+  };
+  if (ord[0] === "g") {
+    const n = +ord.slice(1), node = RES[n];
+    if (!node) { u.ord = ""; return; }
+    if (u.cr && Math.sign(u.cr) !== (node.k === "g" ? 1 : -1)) u.cr = 0; // switched from gold to wood: drop the load
+    if (!u.cr) {
+      if (host.amt[n] <= 0) { const alt = nearestNode(node.k, u, 500); u.ord = alt >= 0 ? "g" + alt : ""; return; }
+      if (Math.hypot(node.x - u.x, node.y - u.y) > node.r + U.r + 6) { moveToward(u, node.x, node.y, step); return; }
+      u.a = 2; u.ht += dt;
+      if (u.ht * 1000 >= CONFIG.gatherMs) { u.ht = 0; const take = Math.min(CONFIG.carry, host.amt[n]); host.amt[n] -= take; host.dirtyRes = true; u.cr = node.k === "g" ? take : -take; }
+    } else {
+      let hall = null, hd = 1e9;
+      for (const b of f.b) if (b.t === 0 && isDone(b)) { const d = Math.hypot(b.x - u.x, b.y - u.y); if (d < hd) { hd = d; hall = b; } }
+      if (!hall) { u.ord = ""; return; }
+      if (hd > BUILDS[0].r + U.r + 8) { moveToward(u, hall.x, hall.y, step); u.a = 2; return; }
+      if (u.cr > 0) f.g += u.cr; else f.w -= u.cr;
+      u.cr = 0; host.dirtyB[u.o] = true;
+    }
+  } else if (ord[0] === "b") {
+    const b = byId.get(+ord.slice(1));
+    if (!b || !b.isB || isDone(b) || b.o !== u.o) { u.ord = autoGather(u); return; }
+    if (Math.hypot(b.x - u.x, b.y - u.y) > BUILDS[b.t].r + U.r + 6) { moveToward(u, b.x, b.y, step); return; }
+    u.a = 3; const B = BUILDS[b.t];
+    b.bp = Math.min(100, b.bp + (dt / B.time) * 100); b.hp = Math.min(B.hp, b.hp + (B.hp * 0.9 * dt) / B.time); host.dirtyB[u.o] = true;
+  } else if (ord[0] === "a") {
+    const t = byId.get(+ord.slice(1));
+    if (!t || t.hp <= 0 || t.o === u.o) { u.ord = ""; u.tg = 0; return; }
+    engage(t);
+  } else if (ord[0] === "m" || ord[0] === "A") {
+    const [x, y] = ord.slice(1).split(",").map(Number);
+    if (ord[0] === "A") { const e = enemyNear(u.o, u.x, u.y, CONFIG.aggro, false); if (e) { engage(e); return; } }
+    if (Math.hypot(x - u.x, y - u.y) > 8) moveToward(u, x, y, step); else u.ord = "";
+  } else if (u.t > 0) { // idle soldiers fight whatever comes close
+    const e = enemyNear(u.o, u.x, u.y, CONFIG.aggro * 0.8, false);
+    if (e) engage(e); else u.tg = 0;
+  }
+}
+function publishHost(now) {
+  if (now - host.lastU > CONFIG.sendMs) {
+    host.lastU = now;
+    host.f.forEach((f, k) => net.setShared("u" + k, JSON.stringify(f.u.map((u) => [u.id, u.t, Math.round(u.x), Math.round(u.y), Math.ceil(u.hp), u.a, u.tg, u.sw % 100, u.ord, u.cr]))));
+    host.f.forEach((f, k) => {
+      if (!host.dirtyB[k]) return;
+      host.dirtyB[k] = false;
+      const old = shared("b" + k, null);
+      net.setShared("b" + k, JSON.stringify({ v: (old?.v ?? 0) + 1, g: Math.floor(f.g), w: Math.floor(f.w), kl: f.kills, b: f.b.map((b) => [b.id, b.t, b.x, b.y, Math.ceil(b.hp), Math.floor(b.bp), b.q, b.qs, b.sw % 100, b.tg]) }));
+    });
+  }
+  if (host.dirtyRes && now - host.lastRes > 600) { host.dirtyRes = false; host.lastRes = now; net.setShared("res", JSON.stringify(host.amt)); }
+}
+
+// ── COMMANDS ────────────────────────────────────────────────────────────────────────
+const canPay = (f, o) => f.g >= o.gold && f.w >= o.wood;
+const supply = (f) => f.u.length + f.b.reduce((s, b) => s + b.q.length, 0);
+/** Is (x, y) free for a building of type t for base k: on the map, near your buildings, clear of everything else? */
+function canPlace(k, t, x, y, fs, amt) {
+  const r = BUILDS[t].r;
+  if (x < r + 10 || y < r + 10 || x > MS - r - 10 || y > MS - r - 10) return false;
+  if (!fs[k].b.some((b) => Math.hypot(b.x - x, b.y - y) < CONFIG.buildRange)) return false;
+  for (const f of fs) for (const b of f.b) if (Math.hypot(b.x - x, b.y - y) < r + BUILDS[b.t].r + 12) return false;
+  return RES.every((n, i) => amt[i] <= 0 || Math.hypot(n.x - x, n.y - y) > r + n.r + 12);
+}
+/** A command from base k's player (or its bot). Checked here: you own the units, you can pay, the spot is free. */
+function applyCmd(k, c) {
+  const m = match(), f = host.f[k];
+  if (!m || m.ph !== "play" || !f || m.seats[k].out || !c) return;
+  const mine = (ids) => (Array.isArray(ids) ? ids : []).slice(0, CONFIG.unitCap).map((id) => f.u.find((u) => u.id === id)).filter(Boolean);
+  if (c.k === "train") {
+    const b = f.b.find((x) => x.id === c.b), t = c.t | 0, U = UNITS[t];
+    if (!b || !isDone(b) || !U || !BUILDS[b.t].trains.includes(t) || b.q.length >= 5 || !canPay(f, U) || supply(f) >= CONFIG.unitCap) return;
+    f.g -= U.gold; f.w -= U.wood;
+    if (!b.q.length) b.qs = Date.now();
+    b.q += t; host.dirtyB[k] = true;
+  } else if (c.k === "build") {
+    const t = c.t | 0, B = BUILDS[t], workers = mine(c.u).filter((u) => u.t === 0), x = Math.round(+c.x), y = Math.round(+c.y);
+    if (t < 1 || !B || !workers.length || !canPay(f, B) || !canPlace(k, t, x, y, host.f, host.amt)) return;
+    f.g -= B.gold; f.w -= B.wood;
+    const b = newBuilding(t, x, y, k, false); f.b.push(b);
+    for (const u of workers) u.ord = "b" + b.id;
+    host.dirtyB[k] = true;
+  } else if (c.k === "stop") for (const u of mine(c.u)) { u.ord = ""; u.tg = 0; }
+  else if (c.k === "go") {
+    const units = mine(c.u), x = +c.x || 0, y = +c.y || 0;
+    const enemy = host.f.some((g, j) => j !== k && (g.u.some((u) => u.id === c.tg) || g.b.some((b) => b.id === c.tg)));
+    const site = f.b.find((b) => b.id === c.tg && !isDone(b));
+    units.forEach((u, i) => {
+      if (enemy) u.ord = "a" + c.tg;
+      else if (u.t === 0 && Number.isInteger(c.r) && RES[c.r] && host.amt[c.r] > 0) u.ord = "g" + c.r;
+      else if (u.t === 0 && site) u.ord = "b" + site.id;
+      else { const a = i * 2.4, rr = 13 * Math.sqrt(i); u.ord = `${u.t === 0 ? "m" : "A"}${Math.round(x + Math.cos(a) * rr)},${Math.round(y + Math.sin(a) * rr)}`; } // spread out round the point
+    });
+  }
+}
+
+// ── BOTS (HOST) ─────────────────────────────────────────────────────────────────────
+/** Once a second for every base nobody plays: more workers, put idle ones to work, build up, train counters, attack in waves. */
+function botsTick(m) {
+  host.f.forEach((f, k) => {
+    if (m.seats[k].w || m.seats[k].out || !f.b.length) return;
+    const hall = f.b.find((b) => b.t === 0), workers = f.u.filter((u) => u.t === 0), army = f.u.filter((u) => u.t > 0);
+    const barracks = f.b.filter((b) => b.t === 1), towers = f.b.filter((b) => b.t === 2);
+    if (!hall) return;
+    if (workers.length < 9 && hall.q.length < 2 && Math.random() < 0.8) applyCmd(k, { k: "train", b: hall.id, t: 0 });
+    workers.filter((u) => !u.ord).forEach((u, i) => { const n = nearestNode(i % 4 === 3 || f.w < 60 ? "w" : "g", u); if (n >= 0) u.ord = "g" + n; });
+    const onWood = workers.filter((u) => u.ord[0] === "g" && RES[+u.ord.slice(1)]?.k === "w").length;
+    if (onWood < Math.ceil(workers.length / 4)) { const u = workers.find((x) => x.ord[0] === "g" && RES[+x.ord.slice(1)]?.k === "g" && !x.cr), n = u ? nearestNode("w", u) : -1; if (n >= 0) u.ord = "g" + n; }
+    const builder = workers.find((u) => u.ord[0] === "g");
+    const spot = (t) => { for (let tries = 0; tries < 24; tries++) { const a = Math.atan2(MID.y - hall.y, MID.x - hall.x) + rnd(-1.3, 1.3), d = rnd(110, 260), x = hall.x + Math.cos(a) * d, y = hall.y + Math.sin(a) * d; if (canPlace(k, t, x, y, host.f, host.amt)) return { x, y }; } return null; };
+    const building = f.b.some((b) => !isDone(b));
+    if (builder && !building) {
+      const want = !barracks.length ? 1 : !towers.length && f.g > 120 ? 2 : barracks.length < 2 && workers.length >= 8 && f.g > 220 ? 1 : towers.length < 2 && f.g > 300 ? 2 : 0;
+      const p = want && canPay(f, BUILDS[want]) ? spot(want) : null;
+      if (p) applyCmd(k, { k: "build", t: want, u: [builder.id], x: p.x, y: p.y });
+    }
+    // soldiers: counter what the enemies field most, with a little randomness
+    const seen = [0, 0, 0, 0]; host.f.forEach((g, j) => { if (j !== k) for (const u of g.u) if (u.t > 0) seen[u.t]++; });
+    const top = seen.indexOf(Math.max(...seen.slice(1)));
+    for (const b of barracks) if (isDone(b) && b.q.length < 2) {
+      const counter = UNITS.findIndex((U) => U.beats === top), t = seen[top] > 2 && Math.random() < 0.6 && counter > 0 ? counter : 1 + Math.floor(Math.random() * 3);
+      applyCmd(k, { k: "train", b: b.id, t });
+    }
+    // defend home first; otherwise attack in waves once the army is big enough
+    const raider = host.f.flatMap((g, j) => (j === k ? [] : g.u)).find((u) => Math.hypot(u.x - hall.x, u.y - hall.y) < 380);
+    const idle = army.filter((u) => !u.ord);
+    if (raider) army.filter((u) => !u.ord || u.ord[0] === "A").forEach((u) => (u.ord = "a" + raider.id));
+    else if (idle.length >= CONFIG.firstWave + host.waves[k] * 2 && Date.now() - m.at > CONFIG.calmMs) {
+      const targets = host.f.map((g, j) => (j !== k && g.b.length ? g.b.find((b) => b.t === 0) : null)).filter(Boolean);
+      const t = targets.sort((a, b) => Math.hypot(a.x - hall.x, a.y - hall.y) - Math.hypot(b.x - hall.x, b.y - hall.y))[ATTRACT ? 0 : Math.random() < 0.7 ? 0 : targets.length - 1];
+      if (t) { host.waves[k] = Math.min(4, host.waves[k] + 1); idle.forEach((u, i) => { const a = i * 2.4, rr = 13 * Math.sqrt(i); u.ord = `A${Math.round(t.x + Math.cos(a) * rr)},${Math.round(t.y + Math.sin(a) * rr)}`; }); }
+    }
+  });
+}
+
+/** Players take bots' bases (first come, first served; never one that's already out); a player gone for seatGraceMs hands theirs back. */
+function fixSeats(m) {
+  const seats = m.seats.map((s) => ({ ...s }));
+  let changed = false;
+  seats.forEach((s, k) => { if (s.w && !stillHere(s.w)) { seats[k] = { ...s, w: "", n: BOT_NAMES[k] }; changed = true; } });
+  for (const id of ATTRACT ? [] : livePlayers()) {
+    if (seats.some((s) => s.w === id)) continue;
+    const free = seats.findIndex((s) => !s.w && !s.out);
+    if (free < 0) break;
+    seats[free] = { ...seats[free], w: id, n: playerName(id), c: playerColor(id) }; changed = true;
+  }
+  for (const s of seats) if (s.w && (s.n !== playerName(s.w) || s.c !== playerColor(s.w))) { s.n = playerName(s.w); s.c = playerColor(s.w); changed = true; }
+  return changed ? { ...m, seats } : null;
+}
+const playerName = (id) => String(S.entities.players[id]?.n ?? "Player").slice(0, 16);
+const playerColor = (id) => S.entities.players[id]?.c || "#cccccc";
+function newMatch(prev) {
+  const now = Date.now(), seats = BASES.map((b, k) => ({ w: "", n: BOT_NAMES[k], c: COLORS[k], out: 0 }));
+  if (prev) prev.seats.forEach((s, k) => { if (s.w && stillHere(s.w)) seats[k] = { ...s, out: 0 }; });
+  newBattle();
+  return { id: (prev?.id ?? 0) + 1, ph: "play", at: now, end: now + CONFIG.matchMs, win: -1, seats };
+}
+/** How strong a base is, for the time limit: what its units and buildings are worth. */
+const strength = (f) => f.u.reduce((s, u) => s + u.hp, 0) + f.b.reduce((s, b) => s + b.hp, 0);
+
+function hostTick(dt) {
+  if (!host.wasHost) { host.wasHost = true; adopt(); }
+  let m = match();
+  const now = Date.now();
+  if (!m) {
+    if (livePlayers().length > 1 && performance.now() - joinedAt < 2500) return; // just joined a busy room: the match hasn't reached us yet
+    m = writeMatch(newMatch(null));
+  }
+  if (!host.f.length) newBattle();
+  const seated = fixSeats(m);
+  if (seated) m = writeMatch(seated);
+  if (m.ph === "play") {
+    for (const [from, c] of host.cmds) { const k = m.seats.findIndex((s) => s.w === from); if (k >= 0) applyCmd(k, c); }
+    simTick(dt, now);
+    m = match();
+    if (now - host.botAt > (ATTRACT ? 600 : 1000)) { host.botAt = now; botsTick(m); }
+    const alive = m.seats.map((s, k) => k).filter((k) => !m.seats[k].out);
+    if (alive.length <= 1 || now >= m.end) m = writeMatch({ ...m, ph: "over", win: alive.length === 1 ? alive[0] : alive.sort((a, b) => strength(host.f[b]) - strength(host.f[a]))[0], end: now + CONFIG.resultsMs });
+  } else if (m.ph === "over" && (now >= m.end || host.again)) m = writeMatch(newMatch(m));
+  host.cmds = []; host.again = false;
+  publishHost(performance.now());
+}
+
+// ── VIEW ────────────────────────────────────────────────────────────────────────────
+/** Base k's units and buildings, as the host simulates them or as the last snapshot has them. */
+function unitsOf(k) {
+  if (isHost() && host.wasHost) return host.f[k]?.u || [];
+  return shared("u" + k, [], (l) => l.map(([id, t, x, y, hp, a, tg, sw, ord, cr]) => ({ id, t, x, y, hp, a, tg, sw, ord: String(ord || ""), cr, o: k })), ":view");
+}
+function baseOf(k) {
+  if (isHost() && host.wasHost) { const f = host.f[k]; return f ? { g: f.g, w: f.w, kills: f.kills, b: f.b } : { g: 0, w: 0, kills: 0, b: [] }; }
+  return shared("b" + k, null, (o) => ({ g: o?.g ?? 0, w: o?.w ?? 0, kills: o?.kl ?? 0, b: (o?.b || []).map(([id, t, x, y, hp, bp, q, qs, sw, tg]) => ({ id, t, x, y, hp, bp, q: String(q || ""), qs, sw, tg, o: k })) }), ":view");
+}
+const amounts = () => (isHost() && host.wasHost ? host.amt : shared("res", null) || RES.map((r) => r.amt));
+const mySeat = () => (match()?.seats || []).findIndex((s) => s.w === net.sessionId);
+/** Find a unit or building by id, anywhere. */
+function findThing(id) {
+  for (let k = 0; k < 4; k++) { const u = unitsOf(k).find((x) => x.id === id); if (u) return u; const b = baseOf(k).b.find((x) => x.id === id); if (b) return { ...b, isB: true }; }
+  return null;
+}
+
+// ── DRAW ────────────────────────────────────────────────────────────────────────────
+const cv = document.getElementById("game"), ctx = cv.getContext("2d"), ground = document.createElement("canvas");
+let W = 0, H = 0, DPR = 1;
+const cam = { x: MID.x, y: MID.y, z: 1 };
+function mulberry32(a) { return () => { a |= 0; a = (a + 0x6d2b79f5) | 0; let t = Math.imul(a ^ (a >>> 15), 1 | a); t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t; return ((t ^ (t >>> 14)) >>> 0) / 4294967296; }; }
+function fit() { DPR = Math.min(2, devicePixelRatio || 1); W = innerWidth; H = innerHeight; cv.width = W * DPR; cv.height = H * DPR; clampCam(); }
+addEventListener("resize", fit); addEventListener("orientationchange", fit);
+/** The grass, painted once: tufts, flowers, dirt round each base and the middle. */
+(function paintGround() {
+  ground.width = ground.height = MS;
+  const c = ground.getContext("2d"), r = mulberry32(11);
+  c.fillStyle = "#4f7a3a"; c.fillRect(0, 0, MS, MS);
+  for (let i = 0; i < 900; i++) { c.fillStyle = r() < 0.5 ? "#5a874438" : "#43693838"; c.beginPath(); c.arc(r() * MS, r() * MS, 10 + r() * 40, 0, 7); c.fill(); }
+  for (let i = 0; i < 2500; i++) { c.fillStyle = r() < 0.5 ? "#62924a" : "#3f6634"; c.fillRect(r() * MS, r() * MS, 2, 4); } // grass tufts
+  for (const [x, y] of [...BASES, [MID.x, MID.y]]) { const g = c.createRadialGradient(x, y, 20, x, y, 190); g.addColorStop(0, "#8a7350"); g.addColorStop(0.7, "#7a6a48aa"); g.addColorStop(1, "#7a6a4800"); c.fillStyle = g; c.beginPath(); c.arc(x, y, 190, 0, 7); c.fill(); }
+  for (let i = 0; i < 500; i++) { c.fillStyle = ["#e8e27a", "#f2a6c8", "#ffffff"][i % 3]; c.fillRect(r() * MS, r() * MS, 2, 2); }
+  c.strokeStyle = "#2a4220"; c.lineWidth = 8; c.strokeRect(4, 4, MS - 8, MS - 8);
+})();
+function clampCam() {
+  const hw = W / 2 / cam.z, hh = H / 2 / cam.z, pad = 24;
+  cam.x = hw * 2 > MS + pad * 2 ? MID.x : Math.max(hw - pad, Math.min(MS - hw + pad, cam.x));
+  cam.y = hh * 2 > MS + pad * 2 ? MID.y : Math.max(hh - pad, Math.min(MS - hh + pad, cam.y));
+}
+/** Screen point → world point, through the camera actually used for this frame. */
+const toWorld = (sx, sy) => ({ x: cam.x + (sx - W / 2) / cam.z, y: cam.y + (sy - H / 2) / cam.z });
+const views = new Map(); // id -> drawn position, eased toward the latest snapshot
+function eased(id, x, y, dt, snap) { let v = views.get(id); if (!v || Math.hypot(x - v.x, y - v.y) > 200) { v = { x, y }; views.set(id, v); } const k = snap ? 1 : 1 - Math.pow(0.0005, dt); v.x += (x - v.x) * k; v.y += (y - v.y) * k; return v; }
+const shots = [], bits = [], pings = [], lastSw = new Map(), lastSeen = new Map();
+function burst(x, y, color, n) { for (let i = 0; i < n && bits.length < 400; i++) { const a = Math.random() * 6.28, s = 30 + Math.random() * 120; bits.push({ x, y, vx: Math.cos(a) * s, vy: Math.sin(a) * s, life: 0, max: 0.3 + Math.random() * 0.5, color }); } }
+
+function draw(m, dt) {
+  const now = performance.now(), hosting = isHost() && host.wasHost, myK = mySeat(), amt = amounts();
+  ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+  ctx.fillStyle = "#1d2a1a"; ctx.fillRect(0, 0, W, H);
+  ctx.setTransform(DPR * cam.z, 0, 0, DPR * cam.z, DPR * (W / 2 - cam.x * cam.z), DPR * (H / 2 - cam.y * cam.z));
+  ctx.drawImage(ground, 0, 0);
+  // gold mines and trees
+  RES.forEach((n, i) => { if (amt[i] > 0) drawResource(n, amt[i], now); });
+  // buildings, then units (everyone's), with their selection rings
+  const seen = new Set();
+  for (let k = 0; k < 4; k++) {
+    const color = m.seats[k].c;
+    for (const b of baseOf(k).b) { seen.add(b.id); drawBuilding(b, color, sel.bld === b.id, now); watchShots(b, true, k); }
+  }
+  for (let k = 0; k < 4; k++) {
+    const color = m.seats[k].c;
+    for (const u of unitsOf(k)) {
+      seen.add(u.id);
+      const v = eased(u.id, u.x, u.y, dt, hosting); // the host draws its live simulation; everyone else eases between snapshots
+      lastSeen.set(u.id, { x: v.x, y: v.y, c: color });
+      drawUnit(u, v, color, sel.ids.has(u.id), now);
+      watchShots(u, false, k, v);
+    }
+  }
+  for (const [id, p] of lastSeen) if (!seen.has(id)) { burst(p.x, p.y, p.c, 10); lastSeen.delete(id); views.delete(id); } // a unit died: a puff
+  // building placement ghost
+  if (place && pointer.world) { const ok = myK >= 0 && canPlace(myK, place.t, pointer.world.x, pointer.world.y, [0, 1, 2, 3].map((k) => baseOf(k)), amt); ctx.globalAlpha = 0.55; ctx.fillStyle = ok ? "#7dff8a" : "#ff5a5a"; ctx.beginPath(); ctx.arc(pointer.world.x, pointer.world.y, BUILDS[place.t].r, 0, 7); ctx.fill(); ctx.globalAlpha = 1; }
+  // arrows and tower bolts
+  for (let i = shots.length - 1; i >= 0; i--) {
+    const s = shots[i], q = (now - s.t) / s.dur;
+    if (q >= 1) { burst(s.tx, s.ty, "#ffe9a8", 3); shots.splice(i, 1); continue; }
+    const x = s.x + (s.tx - s.x) * q, y = s.y + (s.ty - s.y) * q - Math.sin(q * Math.PI) * s.arc, a = Math.atan2(s.ty - s.y, s.tx - s.x);
+    ctx.strokeStyle = s.color; ctx.lineWidth = 2.5; ctx.beginPath(); ctx.moveTo(x - Math.cos(a) * 10, y - Math.sin(a) * 10); ctx.lineTo(x, y); ctx.stroke();
+  }
+  for (let i = bits.length - 1; i >= 0; i--) { const p = bits[i]; p.life += dt; if (p.life > p.max) { bits.splice(i, 1); continue; } p.x += p.vx * dt; p.y += p.vy * dt; p.vx *= 0.92; p.vy *= 0.92; ctx.globalAlpha = 1 - p.life / p.max; ctx.fillStyle = p.color; ctx.fillRect(p.x - 2, p.y - 2, 4, 4); }
+  ctx.globalAlpha = 1;
+  for (let i = pings.length - 1; i >= 0; i--) { const p = pings[i], q = (now - p.t) / 500; if (q > 1) { pings.splice(i, 1); continue; } ctx.strokeStyle = p.color; ctx.globalAlpha = 1 - q; ctx.lineWidth = 2.5 / cam.z; ctx.beginPath(); ctx.arc(p.x, p.y, 6 + q * 18, 0, 7); ctx.stroke(); ctx.globalAlpha = 1; }
+  // the selection box, then screen-space bits: minimap
+  ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+  if (box) { ctx.strokeStyle = "#7dff8a"; ctx.lineWidth = 1.5; ctx.fillStyle = "#7dff8a22"; const x = Math.min(box.x0, box.x1), y = Math.min(box.y0, box.y1), w = Math.abs(box.x1 - box.x0), h = Math.abs(box.y1 - box.y0); ctx.fillRect(x, y, w, h); ctx.strokeRect(x, y, w, h); }
+  if (!ATTRACT) drawMinimap(m);
+}
+/** Someone attacked since the last frame (its counter went up): an arrow or a bolt for ranged attackers, sparks for melee. */
+function watchShots(o, isB, k, v) {
+  const key = (isB ? "b" : "u") + o.id, prev = lastSw.get(key);
+  lastSw.set(key, o.sw);
+  if (prev === undefined || prev === o.sw || !o.tg) return;
+  const t = findThing(o.tg); if (!t) return;
+  const from = v || o, tv = views.get(t.id) || t;
+  if (isB) shots.push({ x: from.x, y: from.y - 20, tx: tv.x, ty: tv.y, t: performance.now(), dur: 260, arc: 10, color: "#ffd166" });
+  else if (o.t === 2) shots.push({ x: from.x, y: from.y, tx: tv.x, ty: tv.y, t: performance.now(), dur: 300, arc: 18, color: "#f5e6c8" });
+  else burst((from.x + tv.x) / 2, (from.y + tv.y) / 2, "#fff3c4", 3);
+}
+function drawResource(n, amt, now) {
+  if (n.k === "g") {
+    const s = n.r * (0.75 + 0.25 * Math.min(1, amt / 1200));
+    ctx.fillStyle = "#00000040"; ctx.beginPath(); ctx.ellipse(n.x, n.y + s * 0.6, s * 1.2, s * 0.45, 0, 0, 7); ctx.fill();
+    ctx.fillStyle = "#7a6a58"; ctx.beginPath(); ctx.arc(n.x, n.y, s, 0, 7); ctx.fill();
+    for (const [dx, dy, r] of [[-0.4, -0.2, 0.42], [0.35, -0.3, 0.36], [0.05, 0.3, 0.4]]) { ctx.fillStyle = "#ffcf3a"; ctx.beginPath(); ctx.moveTo(n.x + dx * s, n.y + (dy - r) * s); ctx.lineTo(n.x + (dx + r * 0.8) * s, n.y + dy * s); ctx.lineTo(n.x + dx * s, n.y + (dy + r) * s); ctx.lineTo(n.x + (dx - r * 0.8) * s, n.y + dy * s); ctx.fill(); }
+    if (Math.sin(now / 300 + n.x) > 0.95) burst(n.x + rnd(-s, s), n.y + rnd(-s, s), "#fff6b0", 1);
+  } else {
+    const s = n.r * (0.7 + 0.3 * Math.min(1, amt / 200));
+    ctx.fillStyle = "#00000040"; ctx.beginPath(); ctx.ellipse(n.x + 4, n.y + s * 0.8, s, s * 0.4, 0, 0, 7); ctx.fill();
+    ctx.fillStyle = "#6b4a2e"; ctx.fillRect(n.x - 3, n.y, 6, s);
+    ctx.fillStyle = "#2f6b2f"; ctx.beginPath(); ctx.arc(n.x, n.y - s * 0.3, s * 1.15, 0, 7); ctx.fill();
+    ctx.fillStyle = "#3f8a3a"; ctx.beginPath(); ctx.arc(n.x - s * 0.3, n.y - s * 0.6, s * 0.65, 0, 7); ctx.fill();
+  }
+}
+function drawBuilding(b, color, selected, now) {
+  const B = BUILDS[b.t], r = B.r, x = b.x, y = b.y, done = b.bp >= 100;
+  ctx.fillStyle = "#00000050"; ctx.beginPath(); ctx.ellipse(x + 6, y + r * 0.7, r * 1.15, r * 0.5, 0, 0, 7); ctx.fill();
+  if (selected) { ctx.strokeStyle = "#7dff8a"; ctx.lineWidth = 3; ctx.beginPath(); ctx.arc(x, y, r + 8, 0, 7); ctx.stroke(); }
+  ctx.globalAlpha = done ? 1 : 0.55;
+  if (b.t === 0) { // town hall: stone keep with a roof in the base's color
+    ctx.fillStyle = "#b9b2a0"; ctx.fillRect(x - r * 0.85, y - r * 0.55, r * 1.7, r * 1.25);
+    ctx.fillStyle = color; ctx.beginPath(); ctx.moveTo(x - r, y - r * 0.5); ctx.lineTo(x, y - r * 1.15); ctx.lineTo(x + r, y - r * 0.5); ctx.fill();
+    ctx.fillStyle = "#4a3a2a"; ctx.fillRect(x - r * 0.2, y + r * 0.2, r * 0.4, r * 0.5);
+    ctx.fillStyle = "#ffe9a8"; for (const s of [-0.5, 0.5]) ctx.fillRect(x + s * r - 4, y - r * 0.2, 8, 8);
+  } else if (b.t === 1) { // barracks: long hall with a banner
+    ctx.fillStyle = "#9a7a58"; ctx.fillRect(x - r, y - r * 0.5, r * 2, r * 1.1);
+    ctx.fillStyle = "#5a3e28"; ctx.beginPath(); ctx.moveTo(x - r * 1.08, y - r * 0.45); ctx.lineTo(x, y - r * 0.95); ctx.lineTo(x + r * 1.08, y - r * 0.45); ctx.fill();
+    ctx.strokeStyle = "#3a2a1a"; ctx.lineWidth = 2; ctx.beginPath(); ctx.moveTo(x + r * 0.6, y - r * 0.9); ctx.lineTo(x + r * 0.6, y - r * 1.6); ctx.stroke();
+    ctx.fillStyle = color; ctx.beginPath(); ctx.moveTo(x + r * 0.6, y - r * 1.6); ctx.lineTo(x + r * 1.2, y - r * 1.4 + Math.sin(now / 200) * 2); ctx.lineTo(x + r * 0.6, y - r * 1.2); ctx.fill();
+    ctx.fillStyle = "#3a2a1a"; ctx.fillRect(x - 6, y + r * 0.1, 12, r * 0.5);
+  } else { // tower: round stone tower with battlements
+    ctx.fillStyle = "#a8a294"; ctx.fillRect(x - r * 0.7, y - r * 1.5, r * 1.4, r * 2.1);
+    ctx.fillStyle = "#c9c2b0"; for (let i = 0; i < 3; i++) ctx.fillRect(x - r * 0.85 + i * r * 0.62, y - r * 1.85, r * 0.45, r * 0.4);
+    ctx.fillStyle = color; ctx.fillRect(x - r * 0.7, y - r * 0.6, r * 1.4, r * 0.35);
+    ctx.fillStyle = "#2a2a2a"; ctx.fillRect(x - 3, y - r * 1.2, 6, 10);
+  }
+  ctx.globalAlpha = 1;
+  if (!done) { ctx.strokeStyle = "#6b4a2e"; ctx.lineWidth = 2; for (let i = -1; i <= 1; i++) { ctx.beginPath(); ctx.moveTo(x + i * r * 0.6, y + r * 0.6); ctx.lineTo(x + i * r * 0.6, y - r); ctx.stroke(); } }
+  const pct = b.hp / B.hp;
+  if (pct < 0.999 || selected || !done) bar(x, y + r * 0.85 + 4, r * 1.6, done ? pct : b.bp / 100, done ? null : "#ffd166");
+  if (pct < 0.4 && done && Math.random() < 0.15) bits.push({ x: x + rnd(-r, r) * 0.6, y: y - r * 0.5, vx: rnd(-6, 6), vy: -30, life: 0, max: 1, color: "#333a" });
+  if (b.q && b.q.length && done) { ctx.fillStyle = "#ffffffcc"; ctx.font = "700 11px system-ui"; ctx.textAlign = "center"; ctx.fillText(`training ${b.q.length}`, x, y - r * 1.25 - (b.t === 2 ? 30 : 6)); }
+}
+function bar(x, y, w, pct, color) {
+  ctx.fillStyle = "#000a"; ctx.fillRect(x - w / 2 - 1, y - 1, w + 2, 6);
+  ctx.fillStyle = color || (pct > 0.5 ? "#5fe07a" : pct > 0.25 ? "#ffd23f" : "#ff5d5d"); ctx.fillRect(x - w / 2, y, w * Math.max(0, Math.min(1, pct)), 4);
+}
+/** A unit, top-down: a body in its base's color and its gear (pick, spear, bow, horse). */
+function drawUnit(u, v, color, selected, now) {
+  const U = UNITS[u.t], r = U.r, x = v.x, y = v.y, t = views.get(u.tg) || null, face = t ? Math.atan2(t.y - y, t.x - x) : (v.face ?? 0);
+  if (v.px !== undefined && Math.hypot(x - v.px, y - v.py) > 0.3 && !t) v.face = Math.atan2(y - v.py, x - v.px);
+  v.px = x; v.py = y;
+  const f = t && u.a === 1 ? face : v.face ?? 0, bob = u.a ? Math.sin(now / 70 + u.id) * 1.5 : 0;
+  ctx.fillStyle = "#00000045"; ctx.beginPath(); ctx.ellipse(x + 2, y + r * 0.7, r * 1.05, r * 0.45, 0, 0, 7); ctx.fill();
+  if (selected) { ctx.strokeStyle = "#7dff8a"; ctx.lineWidth = 2; ctx.beginPath(); ctx.ellipse(x, y + 2, r + 5, r * 0.8 + 3, 0, 0, 7); ctx.stroke(); }
+  if (u.t === 3) { ctx.fillStyle = "#7a5534"; ctx.beginPath(); ctx.ellipse(x, y, r * 1.35, r * 0.75, f, 0, 7); ctx.fill(); ctx.fillStyle = "#5a3d24"; ctx.beginPath(); ctx.arc(x + Math.cos(f) * r * 1.2, y + Math.sin(f) * r * 1.2, r * 0.42, 0, 7); ctx.fill(); }
+  ctx.lineCap = "round";
+  if (u.t === 1) { ctx.strokeStyle = "#d9d0b4"; ctx.lineWidth = 2; ctx.beginPath(); ctx.moveTo(x - Math.cos(f) * r * 0.8, y - Math.sin(f) * r * 0.8); ctx.lineTo(x + Math.cos(f) * (r * 2.1 + bob), y + Math.sin(f) * (r * 2.1 + bob)); ctx.stroke(); }
+  if (u.t === 2) { ctx.strokeStyle = "#8a5a34"; ctx.lineWidth = 2; ctx.beginPath(); ctx.arc(x + Math.cos(f) * r * 0.5, y + Math.sin(f) * r * 0.5, r * 0.95, f - 1.2, f + 1.2); ctx.stroke(); }
+  if (u.t === 0) { ctx.strokeStyle = "#c9c2b0"; ctx.lineWidth = 2; const a = f + 0.8 + (u.a === 2 || u.a === 3 ? Math.sin(now / 90 + u.id) * 0.8 : 0); ctx.beginPath(); ctx.moveTo(x, y); ctx.lineTo(x + Math.cos(a) * r * 1.6, y + Math.sin(a) * r * 1.6); ctx.stroke(); }
+  ctx.fillStyle = color; ctx.beginPath(); ctx.arc(x, y - (u.t === 3 ? 3 : 0) + bob * 0.3, r * (u.t === 3 ? 0.75 : 1), 0, 7); ctx.fill();
+  ctx.strokeStyle = "#0008"; ctx.lineWidth = 1.5; ctx.stroke();
+  ctx.fillStyle = "#ffe0bd"; ctx.beginPath(); ctx.arc(x + Math.cos(f) * r * 0.3, y + Math.sin(f) * r * 0.3 - (u.t === 3 ? 3 : 0), r * 0.42, 0, 7); ctx.fill();
+  if (u.cr) { ctx.fillStyle = u.cr > 0 ? "#ffcf3a" : "#8a5a34"; ctx.fillRect(x - Math.cos(f) * r - 3, y - Math.sin(f) * r - 3, 6, 6); }
+  if (u.hp < U.hp || selected) bar(x, y - r - 7, r * 2.2, u.hp / U.hp);
+}
+function drawMinimap(m) {
+  const size = Math.min(150, W * 0.3, H * 0.24), x0 = W - size - 10, y0 = Math.max(10, 10), k = size / MS;
+  mini = { x0, y0, size };
+  ctx.fillStyle = "#0d140bdd"; ctx.fillRect(x0 - 3, y0 - 3, size + 6, size + 6);
+  ctx.fillStyle = "#3f6a30"; ctx.fillRect(x0, y0, size, size);
+  const amt = amounts();
+  RES.forEach((n, i) => { if (amt[i] > 0) { ctx.fillStyle = n.k === "g" ? "#ffcf3a" : "#2a5a2a"; ctx.fillRect(x0 + n.x * k - 1.5, y0 + n.y * k - 1.5, 3, 3); } });
+  for (let j = 0; j < 4; j++) {
+    ctx.fillStyle = m.seats[j].c;
+    for (const b of baseOf(j).b) ctx.fillRect(x0 + b.x * k - 3, y0 + b.y * k - 3, 6, 6);
+    for (const u of unitsOf(j)) ctx.fillRect(x0 + u.x * k - 1, y0 + u.y * k - 1, 2.5, 2.5);
+  }
+  const hw = W / 2 / cam.z, hh = H / 2 / cam.z;
+  ctx.strokeStyle = "#fff"; ctx.lineWidth = 1; ctx.strokeRect(x0 + (cam.x - hw) * k, y0 + (cam.y - hh) * k, hw * 2 * k, hh * 2 * k);
+}
+let mini = null;
+
+// ── HUD & PANEL ─────────────────────────────────────────────────────────────────────
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
+/** Set an element's HTML only when it changed (rewriting a button mid-tap can swallow the tap). */
+function setHTML(el, html) { if (el.__html !== html) { el.__html = html; el.innerHTML = html; } }
+let board = null, boardFor = -1, msgUntil = 0, dropped = false, lastPh = "", lastOut = -1;
+function banner(title, sub) { $("msg").innerHTML = `${esc(title)}${sub ? `<small>${esc(sub)}</small>` : ""}`; msgUntil = performance.now() + 2200; }
+const price = (o) => `${o.gold}g${o.wood ? " " + o.wood + "w" : ""}`;
+/** The panel: what you have selected and what it can do (train, build, stop), or what to do next. */
+function panelButtons(m) {
+  const k = mySeat(), f = k >= 0 ? baseOf(k) : null, touch = matchMedia("(pointer: coarse)").matches;
+  if (k < 0 || !f) return [ATTRACT ? "" : "Watching: every base has a player", []];
+  if (m.seats[k].out) return ["Your Town Hall fell. You're watching now.", []];
+  const units = unitsOf(k).filter((u) => sel.ids.has(u.id)), bsel = f.b.find((b) => b.id === sel.bld);
+  if (place) return [`Placing a ${BUILDS[place.t].n}: ${touch ? "tap" : "click"} a green spot near your buildings`, [["cancel", "Cancel", "Esc"]]];
+  if (bsel) {
+    const B = BUILDS[bsel.t];
+    const head = `${B.n} · ${Math.ceil(bsel.hp)}/${B.hp}${bsel.bp < 100 ? ` · building ${Math.floor(bsel.bp)}%` : bsel.q.length ? ` · training ${bsel.q.split("").map((t) => UNITS[+t].n).join(", ")}` : ""}`;
+    return [head, bsel.bp < 100 ? [] : B.trains.map((t, i) => [`train:${t}`, `${UNITS[t].n}`, `${price(UNITS[t])}${touch ? "" : " · " + (i + 1)}`, !(f.g >= UNITS[t].gold && f.w >= UNITS[t].wood)])];
+  }
+  if (units.length) {
+    const counts = [0, 0, 0, 0]; units.forEach((u) => counts[u.t]++);
+    const head = counts.map((n, t) => (n ? `${n} ${UNITS[t].n}${n > 1 ? "s" : ""}` : "")).filter(Boolean).join(", ");
+    const acts = [];
+    if (counts[0]) acts.push(["build:1", "Barracks", `${price(BUILDS[1])}${touch ? "" : " · 1"}`, !(f.g >= BUILDS[1].gold && f.w >= BUILDS[1].wood)], ["build:2", "Tower", `${price(BUILDS[2])}${touch ? "" : " · 2"}`, !(f.g >= BUILDS[2].gold && f.w >= BUILDS[2].wood)]);
+    acts.push(["stop", "Stop", touch ? "" : "X"]);
+    if (touch) acts.push(["clear", "Deselect", ""]);
+    return [`${head} · ${touch ? "tap the map to send them" : "right-click to send them"}`, acts];
+  }
+  const tips = touch ? "Tap a unit or building. Drag to look around; Box, then drag, to select many." : "Click or drag a box to select. Right-click to move, attack or gather. WASD moves the view.";
+  return [tips, [["army", "Army", touch ? "" : "Space"], ["idle", "Workers", touch ? "" : "I"], ["hall", "Town Hall", touch ? "" : "H"]].concat(touch ? [["box", boxMode ? "Box: on" : "Box", "", false, boxMode]] : [])];
+}
+function hud(m) {
+  const now = Date.now(), k = mySeat(), f = k >= 0 ? baseOf(k) : null;
+  $("msg").style.opacity = performance.now() < msgUntil ? 1 : 0;
+  if (m.ph !== lastPh) { if (m.ph === "play") banner("Build up and crush the other bases", k >= 0 ? "Your base is the one with your color" : ""); lastPh = m.ph; }
+  const outs = m.seats.filter((s) => s.out).length;
+  if (outs !== lastOut) { if (lastOut >= 0 && outs > lastOut) { const s = m.seats.find((x, j) => x.out && !prevOut.has(j)); banner(`${s ? (s.w === net.sessionId ? "You are" : s.n + " is") : "A base is"} out!`, ""); } prevOut = new Set(m.seats.map((s, j) => (s.out ? j : -1)).filter((j) => j >= 0)); lastOut = outs; }
+  if (ATTRACT) { for (const id of ["top", "net", "msg", "panel"]) $(id).style.display = "none"; return; }
+  const left = Math.max(0, m.end - now), units = k >= 0 ? unitsOf(k).length + f.b.reduce((s, b) => s + b.q.length, 0) : 0;
+  setHTML($("top"), f ? `<span style="color:#ffcf3a">● ${Math.floor(f.g)}</span><span style="color:#d9a066">▲ ${Math.floor(f.w)}</span><span>👥 ${units}/${CONFIG.unitCap}</span><small>⚔ ${f.kills} · ${m.ph === "play" ? Math.floor(left / 60000) + ":" + String(Math.floor(left / 1000) % 60).padStart(2, "0") : ""}</small>` : `<span>Watching</span>`);
+  const [head, acts] = panelButtons(m);
+  $("panel").style.display = head || acts.length ? "" : "none";
+  setHTML($("what"), `<span>${esc(head)}</span>`);
+  setHTML($("acts"), acts.map(([a, label, sub, off, on]) => `<button data-a="${a}" class="${on ? "on" : ""}" ${off ? "disabled" : ""}>${esc(label)}${sub ? `<small>${esc(sub)}</small>` : ""}</button>`).join(""));
+  const n = livePlayers().length;
+  $("net").textContent = net.offline ? "Offline: playing with bots" : dropped ? "Reconnecting…" : `Online · ${n} player${n === 1 ? "" : "s"}${isHost() ? " · you run the battle" : ""}`;
+  $("over").hidden = m.ph !== "over";
+  if (m.ph === "over") {
+    const w = m.seats[m.win];
+    $("overTitle").textContent = m.win === k && k >= 0 ? "Victory!" : w ? `${w.w === net.sessionId ? "You" : w.n} won` : "Draw";
+    $("overSub").textContent = k >= 0 ? `Your base destroyed ${f.kills} enemy unit${f.kills === 1 ? "" : "s"} and buildings` : "";
+    $("overNext").textContent = `New match in ${Math.max(0, Math.ceil((m.end - now) / 1000))}s`;
+    if (boardFor !== m.id) { boardFor = m.id; showBoard(k >= 0 ? f.kills : 0); }
+  }
+}
+let prevOut = new Set();
+function showBoard(kills) {
+  const list = $("board");
+  if (!board) { list.innerHTML = "<li>Leaderboards need a connection.</li>"; return; }
+  list.innerHTML = "<li>Loading…</li>";
+  (kills > 0 ? board.submit(kills).catch(() => null) : Promise.resolve()).then(() => board.top(10)).then(({ entries }) => {
+    list.innerHTML = entries.length ? entries.map((e) => `<li>${esc(e.username || "Player")}<span>${e.score}</span></li>`).join("") : "<li>No scores yet. Be the first.</li>";
+  }).catch(() => { list.innerHTML = "<li>Couldn't load the leaderboard.</li>"; });
+}
+/** Send a command: the host applies its own directly (intents never come back to the sender). */
+function command(c) { const k = mySeat(); if (k < 0) return; if (isHost()) applyCmd(k, c); else net.send("cmd", c); }
+function doAction(a) {
+  const k = mySeat(); if (k < 0) return;
+  const f = baseOf(k), mine = unitsOf(k);
+  if (a === "cancel") place = null;
+  else if (a.startsWith("train:")) command({ k: "train", b: sel.bld, t: +a.slice(6) });
+  else if (a.startsWith("build:")) place = { t: +a.slice(6) };
+  else if (a === "stop") command({ k: "stop", u: [...sel.ids] });
+  else if (a === "clear") { sel.ids.clear(); sel.bld = 0; }
+  else if (a === "army") { selectUnits(mine.filter((u) => u.t > 0)); }
+  else if (a === "idle") { selectUnits(mine.filter((u) => u.t === 0 && !u.ord).length ? mine.filter((u) => u.t === 0 && !u.ord) : mine.filter((u) => u.t === 0)); }
+  else if (a === "hall") { const h = f.b.find((b) => b.t === 0); if (h) { sel.ids.clear(); sel.bld = h.id; cam.x = h.x; cam.y = h.y; clampCam(); } }
+  else if (a === "box") boxMode = !boxMode;
+}
+function selectUnits(list) { sel.ids = new Set(list.map((u) => u.id)); sel.bld = 0; if (list.length) { const cx = list.reduce((s, u) => s + u.x, 0) / list.length, cy = list.reduce((s, u) => s + u.y, 0) / list.length; if (Math.hypot(cx - cam.x, cy - cam.y) > Math.min(W, H) / cam.z / 2) { cam.x = cx; cam.y = cy; clampCam(); } } }
+$("acts").addEventListener("click", (e) => { const b = e.target.closest("button"); if (b && !b.disabled) doAction(b.dataset.a); });
+$("again").onclick = () => { if (isHost()) host.again = true; else net.send("again", {}); };
+let audio = null;
+function sfx(kind) {
+  if (!audio || ATTRACT) return;
+  const t = audio.currentTime, tone = (f0, f1, dur, v, type = "sine", at = 0) => { const o = audio.createOscillator(), g = audio.createGain(); o.type = type; o.frequency.setValueAtTime(f0, t + at); o.frequency.exponentialRampToValueAtTime(f1, t + at + dur); g.gain.setValueAtTime(v, t + at); g.gain.exponentialRampToValueAtTime(0.0001, t + at + dur); o.connect(g).connect(audio.destination); o.start(t + at); o.stop(t + at + dur); };
+  if (kind === "go") tone(600, 800, 0.06, 0.04, "triangle");
+  else if (kind === "attack") tone(300, 160, 0.1, 0.06, "square");
+  else if (kind === "select") tone(900, 900, 0.03, 0.03, "triangle");
+}
+
+// ── INPUT ───────────────────────────────────────────────────────────────────────────
+const sel = { ids: new Set(), bld: 0 };
+let place = null, box = null, boxMode = false;
+const pointer = { world: null };
+const keys = new Set(), touches = new Map();
+/** Your own unit or building under a screen point, or an enemy, or a resource. */
+function pickAt(sx, sy) {
+  const p = toWorld(sx, sy), k = mySeat(), slop = 8 / cam.z;
+  let best = null, bd = Infinity;
+  for (let j = 0; j < 4; j++) {
+    for (const u of unitsOf(j)) { const v = views.get(u.id) || u, d = Math.hypot(v.x - p.x, v.y - p.y); if (d < UNITS[u.t].r + slop && d < bd) { bd = d; best = { kind: "unit", o: j, id: u.id, mine: j === k, t: u.t }; } }
+  }
+  if (best) return best;
+  for (let j = 0; j < 4; j++) for (const b of baseOf(j).b) if (Math.hypot(b.x - p.x, b.y - p.y) < BUILDS[b.t].r + slop) return { kind: "bld", o: j, id: b.id, mine: j === k, done: b.bp >= 100 };
+  const amt = amounts();
+  for (let n = 0; n < RES.length; n++) if (amt[n] > 0 && Math.hypot(RES[n].x - p.x, RES[n].y - p.y) < RES[n].r + slop) return { kind: "res", r: n };
+  return { kind: "ground", ...p };
+}
+/** Left-click / tap on something: select it (yours) or, with units selected, send them there (tap commands on touch). */
+function selectAt(sx, sy, add, touch) {
+  const hit = pickAt(sx, sy);
+  if (hit.mine && hit.kind === "unit") { if (!add) { sel.ids.clear(); sel.bld = 0; } sel.ids.add(hit.id); sfx("select"); return; }
+  if (hit.mine && hit.kind === "bld" && !(touch && sel.ids.size && !hit.done)) { sel.ids.clear(); sel.bld = hit.id; sfx("select"); return; }
+  if (touch && sel.ids.size) { orderAt(sx, sy); return; }
+  sel.ids.clear(); sel.bld = 0;
+}
+/** Right-click / tap with units selected: attack an enemy, gather a resource, help build, or go there. */
+function orderAt(sx, sy) {
+  if (!sel.ids.size) return;
+  const hit = pickAt(sx, sy), p = toWorld(sx, sy);
+  const c = { k: "go", u: [...sel.ids], x: Math.round(p.x), y: Math.round(p.y) };
+  if ((hit.kind === "unit" || hit.kind === "bld") && !hit.mine) c.tg = hit.id;
+  if (hit.kind === "bld" && hit.mine) c.tg = hit.id;
+  if (hit.kind === "res") c.r = hit.r;
+  command(c);
+  pings.push({ x: p.x, y: p.y, t: performance.now(), color: c.tg && !hit.mine ? "#ff5a5a" : "#7dff8a" });
+  sfx(c.tg && !hit.mine ? "attack" : "go");
+}
+function placeAt(sx, sy) {
+  const p = toWorld(sx, sy), k = mySeat(), workers = unitsOf(k).filter((u) => u.t === 0 && sel.ids.has(u.id));
+  const list = workers.length ? workers : unitsOf(k).filter((u) => u.t === 0).sort((a, b) => Math.hypot(a.x - p.x, a.y - p.y) - Math.hypot(b.x - p.x, b.y - p.y)).slice(0, 1);
+  if (!canPlace(k, place.t, p.x, p.y, [0, 1, 2, 3].map((j) => baseOf(j)), amounts())) { banner("Can't build there", "Pick a clear spot near your buildings"); return; }
+  command({ k: "build", t: place.t, u: list.map((u) => u.id), x: Math.round(p.x), y: Math.round(p.y) });
+  pings.push({ x: p.x, y: p.y, t: performance.now(), color: "#ffd166" });
+  place = null;
+}
+function boxSelect() {
+  const a = toWorld(Math.min(box.x0, box.x1), Math.min(box.y0, box.y1)), b = toWorld(Math.max(box.x0, box.x1), Math.max(box.y0, box.y1));
+  const inside = unitsOf(mySeat()).filter((u) => { const v = views.get(u.id) || u; return v.x >= a.x && v.x <= b.x && v.y >= a.y && v.y <= b.y; });
+  const army = inside.filter((u) => u.t > 0);
+  sel.ids = new Set((army.length ? army : inside).map((u) => u.id)); sel.bld = 0;
+  if (inside.length) sfx("select");
+}
+const inMini = (x, y) => mini && x >= mini.x0 && y >= mini.y0 && x <= mini.x0 + mini.size && y <= mini.y0 + mini.size;
+function miniJump(x, y) { cam.x = ((x - mini.x0) / mini.size) * MS; cam.y = ((y - mini.y0) / mini.size) * MS; clampCam(); }
+cv.addEventListener("contextmenu", (e) => e.preventDefault());
+cv.addEventListener("pointerdown", (e) => {
+  e.preventDefault(); cv.setPointerCapture(e.pointerId);
+  try { audio ||= new AudioContext(); } catch {}
+  if (inMini(e.clientX, e.clientY)) { miniJump(e.clientX, e.clientY); touches.set(e.pointerId, { mini: true }); return; }
+  if (e.pointerType === "mouse") {
+    if (e.button === 2) { if (place) place = null; else orderAt(e.clientX, e.clientY); return; }
+    if (e.button === 1) { touches.set(e.pointerId, { x: e.clientX, y: e.clientY, pan: true }); return; }
+    if (place) { placeAt(e.clientX, e.clientY); return; }
+    box = { x0: e.clientX, y0: e.clientY, x1: e.clientX, y1: e.clientY, mouse: true };
+    return;
+  }
+  touches.set(e.pointerId, { x: e.clientX, y: e.clientY, x0: e.clientX, y0: e.clientY, moved: false });
+  if (touches.size === 2) { const [a, b] = [...touches.values()]; pinch = { d: Math.hypot(a.x - b.x, a.y - b.y), z: cam.z }; box = null; }
+  else if (boxMode) box = { x0: e.clientX, y0: e.clientY, x1: e.clientX, y1: e.clientY };
+});
+let pinch = null;
+cv.addEventListener("pointermove", (e) => {
+  pointer.world = toWorld(e.clientX, e.clientY);
+  const t = touches.get(e.pointerId);
+  if (box && (e.pointerType === "mouse" ? box.mouse : t)) { box.x1 = e.clientX; box.y1 = e.clientY; if (t) t.moved = true; return; }
+  if (!t) return;
+  if (t.mini) { miniJump(e.clientX, e.clientY); return; }
+  const dx = e.clientX - t.x, dy = e.clientY - t.y;
+  t.x = e.clientX; t.y = e.clientY;
+  if (Math.hypot(e.clientX - (t.x0 ?? e.clientX), e.clientY - (t.y0 ?? e.clientY)) > 10) t.moved = true;
+  if (pinch && touches.size === 2) { const [a, b] = [...touches.values()]; cam.z = Math.max(0.35, Math.min(2.2, pinch.z * Math.hypot(a.x - b.x, a.y - b.y) / pinch.d)); }
+  if (t.pan || e.pointerType === "touch") { cam.x -= dx / cam.z / (touches.size || 1); cam.y -= dy / cam.z / (touches.size || 1); }
+  clampCam();
+});
+function pointerEnd(e) {
+  const t = touches.get(e.pointerId);
+  touches.delete(e.pointerId);
+  if (touches.size < 2) pinch = null;
+  if (e.pointerType === "mouse" && box && box.mouse && e.button === 0) {
+    if (Math.hypot(box.x1 - box.x0, box.y1 - box.y0) < 6) selectAt(e.clientX, e.clientY, e.shiftKey, false); else boxSelect();
+    box = null; return;
+  }
+  if (!t || t.mini || e.pointerType === "mouse") return;
+  if (box) { if (Math.hypot(box.x1 - box.x0, box.y1 - box.y0) > 12) boxSelect(); box = null; boxMode = false; if (t.moved) return; }
+  if (t.moved || e.type === "pointercancel") return;
+  if (place) placeAt(e.clientX, e.clientY); else selectAt(e.clientX, e.clientY, false, true);
+}
+cv.addEventListener("pointerup", pointerEnd); cv.addEventListener("pointercancel", pointerEnd);
+cv.addEventListener("wheel", (e) => { e.preventDefault(); const before = toWorld(e.clientX, e.clientY); cam.z = Math.max(0.35, Math.min(2.2, cam.z * (e.deltaY > 0 ? 0.9 : 1.1))); const after = toWorld(e.clientX, e.clientY); cam.x += before.x - after.x; cam.y += before.y - after.y; clampCam(); }, { passive: false });
+addEventListener("keydown", (e) => {
+  const key = e.key.toLowerCase(); keys.add(key);
+  if (key === "escape") { place = null; sel.ids.clear(); sel.bld = 0; }
+  const [, acts] = panelButtons(match() || { seats: [] });
+  const hot = { 1: 0, 2: 1, 3: 2 }[key];
+  if (hot !== undefined && acts[hot] && !acts[hot][3] && !acts[hot][0].match(/army|idle|hall/)) doAction(acts[hot][0]);
+  if (key === " ") { e.preventDefault(); doAction("army"); }
+  if (key === "i") doAction("idle");
+  if (key === "h") doAction("hall");
+  if (key === "x" && sel.ids.size) doAction("stop");
+});
+addEventListener("keyup", (e) => keys.delete(e.key.toLowerCase()));
+addEventListener("blur", () => keys.clear());
+document.addEventListener("touchmove", (e) => e.preventDefault(), { passive: false });
+function panKeys(dt) {
+  const v = 700 / cam.z * dt;
+  if (keys.has("a") || keys.has("arrowleft")) cam.x -= v;
+  if (keys.has("d") || keys.has("arrowright")) cam.x += v;
+  if (keys.has("w") || keys.has("arrowup")) cam.y -= v;
+  if (keys.has("s") || keys.has("arrowdown")) cam.y += v;
+  clampCam();
+}
+
+// ── MAIN LOOP ───────────────────────────────────────────────────────────────────────
+/** Two people in one color (or a person in a bot's color): the one with the higher sessionId picks a free color. */
+let myColor = COLORS[0];
+const myName = (() => { try { return localStorage.getItem("mpa-name") || ""; } catch { return ""; } })() ||
+  ["Brave", "Clever", "Sunny", "Swift", "Lucky", "Mighty"][Math.floor(Math.random() * 6)] + " " + ["Otter", "Fox", "Badger", "Owl", "Panda", "Llama"][Math.floor(Math.random() * 6)];
+function fixColor() {
+  const others = Object.entries(S.entities.players || {}).filter(([id]) => id !== net.sessionId), bots = (match()?.seats || []).filter((s) => !s.w).map((s) => s.c);
+  if (!others.some(([id, p]) => p.c === myColor && id < net.sessionId) && !bots.includes(myColor)) return;
+  const taken = new Set([...others.map(([, p]) => p.c), ...bots]);
+  myColor = COLORS.find((c) => !taken.has(c)) || myColor; net.me.set("c", myColor);
+}
+let last = performance.now(), lastHb = 0, lastHud = 0, camSet = -1;
+/** The preview's camera watches the first base and follows the fighting near it. */
+function attractCam(dt) {
+  let sx = 0, sy = 0, n = 0;
+  for (let k = 0; k < 4; k++) for (const u of unitsOf(k)) if (u.a === 1 && Math.hypot(u.x - BASES[0][0], u.y - BASES[0][1]) < 520) { sx += u.x; sy += u.y; n++; }
+  const tx = n ? (sx / n + 2 * 380) / 3 : 380, ty = n ? (sy / n + 2 * 330) / 3 : 330;
+  cam.z = Math.min(W, H) / 400;
+  cam.x += (tx - cam.x) * Math.min(1, dt * 0.8); cam.y += (ty - cam.y) * Math.min(1, dt * 0.8); clampCam();
+}
+function frame(now) {
+  requestAnimationFrame(frame);
+  const t0 = performance.now(); // not `now`: the first frame after a freeze can be stamped from before it ended
+  if (frameAt && t0 - frameAt > 1000) { wokeAt = t0; host.wasHost = false; host.last = null; } // woke from a stall: drop my host copy, adopt state again (see isHost)
+  frameAt = t0;
+  const dt = Math.max(0, Math.min(0.05, (now - last) / 1000)); last = now;
+  if (now - lastHb > 1000) { lastHb = now; net.me.set("hb", Date.now()); fixColor(); }
+  if (isHost()) hostTick(dt); else { host.wasHost = false; host.last = null; host.cmds = []; }
+  const m = match();
+  if (!m) { ctx.setTransform(DPR, 0, 0, DPR, 0, 0); ctx.fillStyle = "#1d2a1a"; ctx.fillRect(0, 0, W, H); return; }
+  const k = mySeat();
+  if (camSet !== m.id + "." + k && k >= 0) { const h = baseOf(k).b.find((b) => b.t === 0); if (h) { camSet = m.id + "." + k; cam.x = h.x; cam.y = h.y; cam.z = Math.min(1.4, Math.max(0.8, Math.min(W, H) / (W < 600 ? 440 : 520))); sel.ids.clear(); sel.bld = 0; place = null; clampCam(); } }
+  if (k < 0 && camSet !== "watch" && !ATTRACT) { camSet = "watch"; cam.x = MID.x; cam.y = MID.y; cam.z = Math.min(W, H) / (MS * 0.95); clampCam(); }
+  if (ATTRACT) attractCam(dt); else panKeys(dt);
+  if (k >= 0) { const alive = new Set(unitsOf(k).map((u) => u.id)); for (const id of sel.ids) if (!alive.has(id)) sel.ids.delete(id); if (sel.bld && !baseOf(k).b.some((b) => b.id === sel.bld)) sel.bld = 0; }
+  draw(m, dt);
+  if (now - lastHud > 150) { lastHud = now; hud(m); }
+}
+
+(async function start() {
+  fit();
+  net = await connect();
+  net.onState((st) => { S = st; });
+  net.on("cmd", (c, from) => { if (isHost() && c) host.cmds.push([from, c]); });
+  net.on("again", () => { if (isHost()) host.again = true; });
+  net.onDisconnect(() => { dropped = true; $("net").textContent = "Reconnecting…"; });
+  net.onReconnect(() => { dropped = false; });
+  joinedAt = performance.now();
+  const taken = new Set([...Object.entries(S.entities.players || {}).filter(([id]) => id !== net.sessionId).map(([, p]) => p.c), ...(shared("match", null)?.seats || []).map((s) => s.c)]);
+  myColor = COLORS.find((c) => !taken.has(c)) || COLORS[Math.floor(Math.random() * COLORS.length)];
+  net.me.set({ n: myName, c: myColor, hb: Date.now() });
+  if (!net.offline && typeof MP !== "undefined") board = MP.auth({ key: MP_CONNECT.key, apiUrl: MP_CONNECT.apiUrl }).leaderboard(CONFIG.board);
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>
