@@ -30,6 +30,7 @@
   .card h2 { margin: 0; font-size: 25px; color: #ffd166; } .card h3 { margin: 14px 0 4px; font-size: 13px; color: #b5e08a; text-align: left; }
   .card p { margin: 6px 0; font-size: 14px; opacity: .85; }
   .card ol { margin: 0; padding-left: 24px; font-size: 14px; text-align: left; } .card li span { float: right; }
+  .card li.note { list-style: none; margin-left: -24px; opacity: .8; } /* a status line, not a numbered entry */
   button.go { width: 100%; min-height: 48px; margin-top: 14px; border: 0; border-radius: 12px; background: #ffd166; color: #2a1a00; font: 800 17px system-ui, sans-serif; cursor: pointer; }
   @media (max-width: 520px) { #top { font-size: 13px; gap: 8px; padding: 5px 9px; } #acts button { min-width: 64px; font-size: 12px; } }
 </style>
@@ -43,7 +44,7 @@
 <div id="panel"><div id="what"></div><div id="acts"></div></div>
 <div id="over" hidden><div class="card">
   <h2 id="overTitle"></h2><p id="overSub"></p>
-  <h3>Most kills in a match</h3><ol id="board"><li>Loading…</li></ol>
+  <h3>Most kills in a match</h3><ol id="board"><li class="note">Loading…</li></ol>
   <button class="go" id="again">New match</button><p id="overNext"></p>
 </div></div>
 <script>
@@ -429,26 +430,27 @@ function botsTick(m) {
     const barracks = f.b.filter((b) => b.t === 1), towers = f.b.filter((b) => b.t === 2);
     if (!hall) return;
     if (workers.length < 9 && hall.q.length < 2 && Math.random() < 0.8) applyCmd(k, { k: "train", b: hall.id, t: 0 });
-    workers.filter((u) => !u.ord).forEach((u, i) => { const n = nearestNode(i % 4 === 3 || f.w < 60 ? "w" : "g", u); if (n >= 0) u.ord = "g" + n; });
+    workers.filter((u) => !u.ord).forEach((u, i) => { const n = nearestNode(i % 4 === 3 || (f.w < 60 && f.g > f.w) ? "w" : "g", u); if (n >= 0) u.ord = "g" + n; });
     const onWood = workers.filter((u) => u.ord[0] === "g" && RES[+u.ord.slice(1)]?.k === "w").length;
     if (onWood < Math.ceil(workers.length / 4)) { const u = workers.find((x) => x.ord[0] === "g" && RES[+x.ord.slice(1)]?.k === "g" && !x.cr), n = u ? nearestNode("w", u) : -1; if (n >= 0) u.ord = "g" + n; }
+    else if (f.w > 250 && f.w > f.g * 2 && onWood > 1) { const u = workers.find((x) => x.ord[0] === "g" && RES[+x.ord.slice(1)]?.k === "w" && !x.cr), n = u ? nearestNode("g", u) : -1; if (n >= 0) u.ord = "g" + n; } // plenty of wood: dig gold
     const builder = workers.find((u) => u.ord[0] === "g");
     const spot = (t) => { for (let tries = 0; tries < 24; tries++) { const a = Math.atan2(MID.y - hall.y, MID.x - hall.x) + rnd(-1.3, 1.3), d = rnd(110, 260), x = hall.x + Math.cos(a) * d, y = hall.y + Math.sin(a) * d; if (canPlace(k, t, x, y, host.f, host.amt)) return { x, y }; } return null; };
-    const building = f.b.some((b) => !isDone(b));
-    if (builder && !building) {
-      const want = !barracks.length ? 1 : !towers.length && f.g > 120 ? 2 : barracks.length < 2 && workers.length >= 8 && f.g > 220 ? 1 : towers.length < 2 && f.g > 300 ? 2 : 0;
-      const p = want && canPay(f, BUILDS[want]) ? spot(want) : null;
-      if (p) applyCmd(k, { k: "build", t: want, u: [builder.id], x: p.x, y: p.y });
-    }
+    const site = f.b.find((b) => !isDone(b));
+    if (site && builder && !workers.some((u) => u.ord === "b" + site.id)) builder.ord = "b" + site.id; // its builder died: send another worker
+    // the next building: a barracks, then a tower once there's an army, then a second barracks and tower (saving up for it)
+    const want = site ? 0 : !barracks.length ? 1 : !towers.length && army.length >= 3 ? 2 : barracks.length < 2 && workers.length >= 8 && army.length >= 7 ? 1 : towers.length < 2 && army.length >= 10 ? 2 : 0;
+    const saving = !!(want && builder && !canPay(f, BUILDS[want]));
+    if (want && builder && !saving) { const p = spot(want); if (p) applyCmd(k, { k: "build", t: want, u: [builder.id], x: p.x, y: p.y }); }
     // soldiers: counter what the enemies field most, with a little randomness
     const seen = [0, 0, 0, 0]; host.f.forEach((g, j) => { if (j !== k) for (const u of g.u) if (u.t > 0) seen[u.t]++; });
     const top = seen.indexOf(Math.max(...seen.slice(1)));
-    for (const b of barracks) if (isDone(b) && b.q.length < 2) {
+    const raider = host.f.flatMap((g, j) => (j === k ? [] : g.u)).find((u) => Math.hypot(u.x - hall.x, u.y - hall.y) < 380);
+    for (const b of barracks) if (isDone(b) && b.q.length < 2 && (!saving || raider || !b.q.length && army.length < 3)) {
       const counter = UNITS.findIndex((U) => U.beats === top), t = seen[top] > 2 && Math.random() < 0.6 && counter > 0 ? counter : 1 + Math.floor(Math.random() * 3);
       applyCmd(k, { k: "train", b: b.id, t });
     }
     // defend home first; otherwise attack in waves once the army is big enough
-    const raider = host.f.flatMap((g, j) => (j === k ? [] : g.u)).find((u) => Math.hypot(u.x - hall.x, u.y - hall.y) < 380);
     const idle = army.filter((u) => !u.ord);
     if (raider) army.filter((u) => !u.ord || u.ord[0] === "A").forEach((u) => (u.ord = "a" + raider.id));
     else if (idle.length >= CONFIG.firstWave + host.waves[k] * 2 && Date.now() - m.at > CONFIG.calmMs) {
@@ -602,7 +604,7 @@ function watchShots(o, isB, k, v) {
   const key = (isB ? "b" : "u") + o.id, prev = lastSw.get(key);
   lastSw.set(key, o.sw);
   if (prev === undefined || prev === o.sw || !o.tg) return;
-  const t = findThing(o.tg); if (!t) return;
+  const t = findThing(o.tg) || lastSeen.get(o.tg); if (!t) return; // lastSeen: the shot that killed it still flies
   const from = v || o, tv = views.get(t.id) || t;
   if (isB) shots.push({ x: from.x, y: from.y - 20, tx: tv.x, ty: tv.y, t: performance.now(), dur: 260, arc: 10, color: "#ffd166" });
   else if (o.t === 2) shots.push({ x: from.x, y: from.y, tx: tv.x, ty: tv.y, t: performance.now(), dur: 300, arc: 18, color: "#f5e6c8" });
@@ -751,11 +753,11 @@ function hud(m) {
 let prevOut = new Set();
 function showBoard(kills) {
   const list = $("board");
-  if (!board) { list.innerHTML = "<li>Leaderboards need a connection.</li>"; return; }
-  list.innerHTML = "<li>Loading…</li>";
+  if (!board) { list.innerHTML = "<li class='note'>Leaderboards need a connection.</li>"; return; }
+  list.innerHTML = "<li class='note'>Loading…</li>";
   (kills > 0 ? board.submit(kills).catch(() => null) : Promise.resolve()).then(() => board.top(10)).then(({ entries }) => {
-    list.innerHTML = entries.length ? entries.map((e) => `<li>${esc(e.username || "Player")}<span>${e.score}</span></li>`).join("") : "<li>No scores yet. Be the first.</li>";
-  }).catch(() => { list.innerHTML = "<li>Couldn't load the leaderboard.</li>"; });
+    list.innerHTML = entries.length ? entries.map((e) => `<li>${esc(e.username || "Player")}<span>${e.score}</span></li>`).join("") : "<li class='note'>No scores yet. Be the first.</li>";
+  }).catch(() => { list.innerHTML = "<li class='note'>Couldn't load the leaderboard.</li>"; });
 }
 /** Send a command: the host applies its own directly (intents never come back to the sender). */
 function command(c) { const k = mySeat(); if (k < 0) return; if (isHost()) applyCmd(k, c); else net.send("cmd", c); }
@@ -888,7 +890,7 @@ addEventListener("keydown", (e) => {
   const key = e.key.toLowerCase(); keys.add(key);
   if (key === "escape") { place = null; sel.ids.clear(); sel.bld = 0; }
   const [, acts] = panelButtons(match() || { seats: [] });
-  const hot = { 1: 0, 2: 1, 3: 2 }[key];
+  const hot = { Digit1: 0, Digit2: 1, Digit3: 2, Numpad1: 0, Numpad2: 1, Numpad3: 2 }[e.code]; // e.code: Shift+1 is still 1
   if (hot !== undefined && acts[hot] && !acts[hot][3] && !acts[hot][0].match(/army|idle|hall/)) doAction(acts[hot][0]);
   if (key === " ") { e.preventDefault(); doAction("army"); }
   if (key === "i") doAction("idle");
